@@ -1,5 +1,6 @@
 import logging
 import fire
+import json
 logger = logging.getLogger(__name__)
 
 def calculate_parameters(module):
@@ -40,7 +41,6 @@ def for_latex_table():
     print(" & ".join(lines))
 
 def find_index(file1, file2, file3):
-    import json
     index = []
     file = []
     lines1 = json.load(open(file1, "r"))
@@ -58,14 +58,6 @@ def find_index(file1, file2, file3):
             index.append(None)
     return index, file
 
-train = json.load(open("fa.test.json", "r"))
-texts = [l["review_body"] for l in train]
-index = []
-for text in texts:
-    if text in a.text.values.tolist():
-            index.append(a.text.values.tolist().index(text))
-    else:
-        index.append(None)
 if __name__ == '__main__':
     fire.Fire()
     # for_latex_table()
