@@ -78,7 +78,7 @@ def readfile(filename, lang=None):
         token = splits[0]
         if lang is not None and token.startswith('%s:' % lang):
             token = token.split('%s:' % lang)[-1]
-        
+
         sentence.append(token)
         label.append(splits[-1])
 
@@ -115,8 +115,8 @@ class NerProcessor(DataProcessor):
         super().__init__()
         self.labels = ["O", "B-MISC", "I-MISC",  "B-PER", "I-PER", "B-ORG", "I-ORG", "B-LOC", "I-LOC"]#, "[CLS]", "[SEP]"]
         self.label_map = dict(zip(self.labels, range(len(self.labels))))
-        
-    
+
+
     """Processor for the CoNLL-2003 data set."""
     def get_train_examples(self, data_dir, lang):
         """See base class."""
@@ -230,21 +230,21 @@ class SentClassProcessor(DataProcessor):
 
     def get_train_examples(self, data_dir, lang):
         """See base class."""
-        file = os.path.join(data_dir, f"{lang}", "*.train.json")
+        file = os.path.join(data_dir, f"{lang}.train.json")
         file = glob(file)[0]
         sents = self.read_json_file(file)
-        return self._create_examples(sents,  "train")
+        return self._create_examples(sents, "train")
 
     def get_dev_examples(self, data_dir, lang):
         """See base class."""
-        file = os.path.join(data_dir, f"{lang}", "*.dev.json")
+        file = os.path.join(data_dir, f"{lang}.dev.json")
         file = glob(file)[0]
         sents = self.read_json_file(file)
         return self._create_examples(sents, "dev")
 
     def get_test_examples(self, data_dir, lang):
         """See base class."""
-        file = os.path.join(data_dir, f"{lang}", "*.test.json")
+        file = os.path.join(data_dir, f"{lang}.test.json")
         file = glob(file)[0]
         sents = self.read_json_file(file)
         return self._create_examples(sents, "test")
@@ -267,8 +267,8 @@ class PANXNerProcessor(DataProcessor):
         super().__init__()
         self.labels = ["O", "B-MISC", "I-MISC",  "B-PER", "I-PER", "B-ORG", "I-ORG", "B-LOC", "I-LOC"]#, "[CLS]", "[SEP]"]
         self.label_map = dict(zip(self.labels, range(len(self.labels))))
-        
-    
+
+
     """Processor for the PANX data set."""
     def get_train_examples(self, data_dir, lang):
         """See base class."""
