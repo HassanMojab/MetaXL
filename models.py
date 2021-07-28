@@ -104,7 +104,7 @@ class BERTSequenceTokenizer():
 
         ids = ids + [0] * (self.max_len - x_len)
         mask = [1] * x_len + [0] * (self.max_len - x_len)
-        
+
         labels = [IGNORED_INDEX] * self.max_len # ignored for all and then set labels for actual tokens
         idx = 0
 
@@ -246,7 +246,7 @@ class BERTSequenceTagger(BertForTokenClassification):
     # note attention_mask here should be the extended attention mask constructed from forward_head
     def forward_tail(self, k, x, attention_mask=None):
         assert k>0 and k<= 1+self.config.num_hidden_layers, 'Wrong layer index!'
-        
+
         hidden_states = x
         for i, layer_module in enumerate(self.bert.encoder.layer[k-1:]):
             layer_outputs = layer_module(hidden_states, attention_mask)
@@ -505,21 +505,22 @@ def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer
         featurized_sentences.append(features)
 
 
-def trim_input(bert_ids, bert_mask, bert_labels=None, train_max=None):
+def trim_input(bert_ids, bert_mask, bert_segments, bert_labels=None, train_max=None):
     max_length = (bert_mask !=0).max(0)[0].nonzero().numel()
     if train_max is not None:
         max_length = min(max_length, train_max)
-    
+
     if max_length < bert_ids.shape[1]:
         bert_ids = bert_ids[:, :max_length]
         bert_mask = bert_mask[:, :max_length]
+        bert_segments = bert_segments[:, :max_length]
         if bert_labels is not None and bert_labels.ndim == 2:
             bert_labels = bert_labels[:, :max_length]
 
     if bert_labels is not None:
-        return bert_ids, bert_mask, bert_labels
+        return bert_ids, bert_mask, bert_segments, bert_labels
     else:
-        return bert_ids, bert_mask
+        return bert_ids, bert_mask, bert_segments
 
 
 def masked_cross_entropy(logit, labels, K):
@@ -554,7 +555,7 @@ class WNets(nn.Module):
 
     def forward(self, i, x):
         return torch.sigmoid(self.nets[i](x))
-        
+
 
 class VNet(nn.Module):
     def __init__(self, in_dim, h_dim, out_dim):

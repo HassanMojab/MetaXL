@@ -1,4 +1,5 @@
 import argparse
+import csv
 import json
 import random
 import conllu
@@ -52,10 +53,11 @@ class InputExample(object):
 class InputFeatures(object):
     """A single set of features of data."""
 
-    def __init__(self, input_ids, input_mask, label_ids):
+    def __init__(self, input_ids, input_mask, label_ids, segment_ids=None):
         self.input_ids = input_ids
         self.input_mask = input_mask
         self.label_ids = label_ids
+        self.segment_ids = segment_ids
 
 def readfile(filename, lang=None):
     '''
@@ -262,6 +264,69 @@ class SentClassProcessor(DataProcessor):
             examples.append(InputExample(guid=guid, text_a=text_a, text_b=text_b, label=label))
         return examples
 
+class NLIClassProcessor(DataProcessor):
+    def __init__(self):
+        super().__init__()
+        self.labels = [
+          "e", # Entailment (0)
+          "n", # Neutral (1)
+          "c"  # Contradiction (2)
+        ]
+        self.label_map = dict(zip(self.labels, range(len(self.labels))))
+
+    def _process_label(self, row):
+        if row[2] == '0':
+            row[2] = 'e'
+        elif row[2] == '1':
+            row[2] = 'n'
+        elif row[2] == '2':
+            row[2] = 'c'
+        return row
+
+    def read_csv_file(self, file):
+        with open(file, newline='') as f:
+            reader = csv.reader(f, delimiter='\t')
+            next(reader)
+            data = list(reader)
+
+        data = list(map(self._process_label, data))
+
+        return data
+
+    def get_train_examples(self, data_dir, lang):
+        """See base class."""
+        file = os.path.join(data_dir, f"{lang}.train.csv")
+        file = glob(file)[0]
+        data = self.read_csv_file(file)
+        return self._create_examples(data, "train")
+
+    def get_dev_examples(self, data_dir, lang):
+        """See base class."""
+        file = os.path.join(data_dir, f"{lang}.dev.csv")
+        file = glob(file)[0]
+        sents = self.read_csv_file(file)
+        return self._create_examples(sents, "dev")
+
+    def get_test_examples(self, data_dir, lang):
+        """See base class."""
+        file = os.path.join(data_dir, f"{lang}.test.csv")
+        file = glob(file)[0]
+        sents = self.read_csv_file(file)
+        return self._create_examples(sents, "test")
+
+    def get_labels(self):
+        return self.labels
+
+    def _create_examples(self, lines, set_type):
+        examples = []
+        for i, (premise, hypothesis, label) in enumerate(lines):
+            guid = "%s-%s" % (set_type, i)
+            text_a = premise
+            text_b = hypothesis
+            label = self.label_map[label]
+            examples.append(InputExample(guid=guid, text_a=text_a, text_b=text_b, label=label))
+        return examples
+
 class PANXNerProcessor(DataProcessor):
     def __init__(self):
         super().__init__()
@@ -301,11 +366,30 @@ class PANXNerProcessor(DataProcessor):
 def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer):
     features = []
     for idx, example in enumerate(examples):
-        input_ids, input_mask, label_ids = tokenizer.encode(example.text_a, example.label)
-        features.append(
-            InputFeatures(input_ids=input_ids[:max_seq_length],
-                          input_mask=input_mask[:max_seq_length],
-                          label_ids=label_ids[:max_seq_length] if type(label_ids) is list else label_ids))
+        if example.text_b:
+            # text_a_id = tokenizer.encode(example.text_a, add_special_tokens=False)[:max_seq_length]
+            # text_b_id = tokenizer.encode(example.text_b, add_special_tokens=False)[:max_seq_length]
+            text_a_id = tokenizer.encode(example.text_a)[0][:int(max_seq_length / 2)]
+            text_b_id = tokenizer.encode(example.text_b)[0][:int(max_seq_length / 2)]
+            pair_token_ids = [tokenizer.cls_id] + text_a_id + [tokenizer.sep_id] + text_b_id + [tokenizer.sep_id]
+            text_a_len = len(text_a_id)
+            text_b_len = len(text_b_id)
+
+            segment_ids = [0] * (text_a_len + 2) + [1] * (text_b_len + 1)  # sentence 0 and sentence 1
+            attention_mask_ids = [1] * (text_a_len + text_b_len + 3)  # mask padded values
+
+            features.append(
+                InputFeatures(input_ids=pair_token_ids,
+                            input_mask=attention_mask_ids,
+                            label_ids=example.label,
+                            segment_ids=segment_ids)
+            )
+        else:
+            input_ids, input_mask, label_ids = tokenizer.encode(example.text_a, example.label)
+            features.append(
+                InputFeatures(input_ids=input_ids[:max_seq_length],
+                            input_mask=input_mask[:max_seq_length],
+                            label_ids=label_ids[:max_seq_length] if type(label_ids) is list else label_ids))
     return features
 
 # def eval(model, test_dataloader, processor):
@@ -342,11 +426,11 @@ def eval(model, test_dataloader, processor, for_classification=False):
 
     for idx, batch_test in enumerate(test_dataloader):
         batch_test = tuple(t.cuda() for t in batch_test)
-        test_ids, test_mask, test_labels = batch_test
-        test_ids, test_mask, test_labels = trim_input(test_ids, test_mask, test_labels)
+        test_ids, test_mask, test_segments, test_labels = batch_test
+        test_ids, test_mask, test_segments, test_labels = trim_input(test_ids, test_mask, test_segments, test_labels)
 
         with torch.no_grad():
-            test_logit = model(test_ids, attention_mask=test_mask, for_classification=for_classification)[0] # batch * sequence lens * labels
+            test_logit = model(test_ids, attention_mask=test_mask, token_type_ids=test_segments, for_classification=for_classification)[0] # batch * sequence lens * labels
 
             pred_labels = test_logit.max(-1)[1]
 
@@ -364,10 +448,10 @@ def eval(model, test_dataloader, processor, for_classification=False):
                 all_y_pred.extend(y_tags_pred)
 
     if for_classification:
-        f1 = f1_score(all_y_true, all_y_pred)
+        f1 = f1_score(all_y_true, all_y_pred, average="micro")
         acc = accuracy_score(all_y_true, all_y_pred)
-        precision = precision_score(all_y_true, all_y_pred)
-        recall = recall_score(all_y_true, all_y_pred)
+        precision = precision_score(all_y_true, all_y_pred, average="micro")
+        recall = recall_score(all_y_true, all_y_pred, average="micro")
     else:
         f1 = seq_f1_score(all_y_true, all_y_pred)
         acc = seq_accuracy_score(all_y_true, all_y_pred)
@@ -406,7 +490,8 @@ def read_data(data_dir, processor, tokenizer, lang, split, max_seq_length, model
         input_ids = torch.tensor([f.input_ids for f in features], dtype=torch.long)
         input_mask = torch.tensor([f.input_mask for f in features], dtype=torch.long)
         label_ids = torch.tensor([f.label_ids for f in features], dtype=torch.long)
-        data = TensorDataset(input_ids, input_mask, label_ids)
+        segment_ids = torch.tensor([f.segment_ids for f in features], dtype=torch.long)
+        data = TensorDataset(input_ids, input_mask, segment_ids, label_ids)
 
         if not os.path.exists(os.path.dirname(pt_name)):
             os.makedirs(os.path.dirname(pt_name))
@@ -425,7 +510,8 @@ def read_data(data_dir, processor, tokenizer, lang, split, max_seq_length, model
             sampled_indices = np.arange(0, N)
         data_subset = TensorDataset(data.tensors[0][sampled_indices],
                              data.tensors[1][sampled_indices],
-                             data.tensors[2][sampled_indices])
+                             data.tensors[2][sampled_indices],
+                             data.tensors[3][sampled_indices])
         data = data_subset
 
     logger.info("  Num %s examples = %d", split, len(data))
@@ -449,7 +535,8 @@ def merge_data(data_dir, processor, tokenizer, langs, split, max_seq_length, ber
 
     merged_data = TensorDataset(torch.cat([x.tensors[0] for x in data_list], dim=0), # input_ids
                                 torch.cat([x.tensors[1] for x in data_list], dim=0), # input_mask
-                                torch.cat([x.tensors[2] for x in data_list], dim=0)) # label_ids
+                                torch.cat([x.tensors[2] for x in data_list], dim=0), # segment_ids
+                                torch.cat([x.tensors[3] for x in data_list], dim=0)) # label_ids
 
     return merged_data
 
@@ -654,8 +741,11 @@ def main():
                   'panx': PANXNerProcessor,
                   'panx_100': PANXNerProcessor,
                   'pos': POSProcessor,
-                  'sent': SentClassProcessor
+                  'sent': SentClassProcessor,
+                  'nli': NLIClassProcessor
     }
+
+    args.for_classification = args.task_name in ["sent", "nli"]
 
     if args.local_rank == -1 or args.no_cuda:
         device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
@@ -731,6 +821,11 @@ def main():
             langs = args.source_languages.split(",")
         else:
             langs = ["zh", "es", "en", "de", "ja", "fr"]
+    elif task_name == 'nli':
+        if args.source_language_strategy == 'specified':
+            langs = args.source_languages.split(",")
+        else:
+            langs = ["en"]
     else:
         raise Exception('invalid task name %s!' % task_name)
 
@@ -786,8 +881,8 @@ def main():
             test_sampler = None
             batch_size = args.batch_size
         else:
-            train_t_sampler = DistributedRandomSampler(train_t_data)
-            train_s_sampler = DistributedRandomSampler(train_s_dataa)
+            train_t_sampler = DistributedSampler(train_t_data)
+            train_s_sampler = DistributedSampler(train_s_data)
             dev_sampler = DistributedSampler(dev_data)
             test_sampler = DistributedSampler(test_data)
             batch_size = int(args.batch_size / int(os.environ['NGPU']))
@@ -962,18 +1057,18 @@ def main():
                 for step, batch_train_t in enumerate(tqdm(train_t_loader.loader, desc="Iteration")):
                     batch_train_t = tuple(t.to(device) for t in batch_train_t)  # tgt train
 
-                    train_t_ids, train_t_mask, train_t_labels = batch_train_t
-                    train_t_ids, train_t_mask, train_t_labels = trim_input(train_t_ids, train_t_mask, train_t_labels, args.train_max_seq_length)
+                    train_t_ids, train_t_mask, train_t_segments, train_t_labels = batch_train_t
+                    train_t_ids, train_t_mask, train_t_segments, train_t_labels = trim_input(train_t_ids, train_t_mask, train_t_segments, train_t_labels, args.train_max_seq_length)
 
                     if len(train_t_ids) == 1:
                         continue
 
                     if args.augcopy > 0:
-                        train_t_ids, train_t_mask, train_t_labels = permute_aug(train_t_ids, train_t_mask, train_t_labels, args.augcopy)
+                        train_t_ids, train_t_mask, train_t_segments, train_t_labels = permute_aug(train_t_ids, train_t_mask, train_t_segments, train_t_labels, args.augcopy)
 
 
                     loss_meta, loss_train = step_gold_only(model, optimizer,
-                                                           train_t_ids, train_t_mask, train_t_labels,
+                                                           train_t_ids, train_t_mask, train_t_segments, train_t_labels,
                                                            args)
                     if step % args.every == 0 and args.local_rank <= 0:  # only do eval on first GPU
                             tqdm.write('Step:%d\tLoss_Meta:%.6f\tLoss_Train:%.6f' % (step, (loss_meta).item(), (loss_train).item()))
@@ -988,12 +1083,12 @@ def main():
                         batch_train_s = tuple(t.to(device) for t in batch_train_s) # src train
                         batch_train_t = tuple(t.to(device) for t in batch_train_t) # tgt train
 
-                        train_s_ids, train_s_mask, train_s_labels = batch_train_s
-                        train_s_ids, train_s_mask, train_s_labels = trim_input(train_s_ids, train_s_mask, train_s_labels, args.train_max_seq_length)
+                        train_s_ids, train_s_mask, train_s_segments, train_s_labels = batch_train_s
+                        train_s_ids, train_s_mask, train_s_segments, train_s_labels = trim_input(train_s_ids, train_s_mask, train_s_segments, train_s_labels, args.train_max_seq_length)
                         # print(train_s_labels)
 
-                        train_t_ids, train_t_mask, train_t_labels = batch_train_t
-                        train_t_ids, train_t_mask, train_t_labels = trim_input(train_t_ids, train_t_mask, train_t_labels, args.train_max_seq_length)
+                        train_t_ids, train_t_mask, train_t_segments, train_t_labels = batch_train_t
+                        train_t_ids, train_t_mask, train_t_segments, train_t_labels = trim_input(train_t_ids, train_t_mask, train_t_segments, train_t_labels, args.train_max_seq_length)
 
                         eta = scheduler.get_last_lr()[0]
 
@@ -1005,8 +1100,8 @@ def main():
 
                         if args.method == "metaxl":
                             half = int(len(train_t_ids)/args.portion)
-                            eval_ids, eval_mask, eval_labels = train_t_ids[half:], train_t_mask[half:], train_t_labels[half:]
-                            train_t_ids, train_t_mask, train_t_labels = train_t_ids[:half], train_t_mask[:half], train_t_labels[:half]
+                            eval_ids, eval_mask, eval_segments, eval_labels = train_t_ids[half:], train_t_mask[half:], train_t_segments[half:], train_t_labels[half:]
+                            train_t_ids, train_t_mask, train_t_segments, train_t_labels = train_t_ids[:half], train_t_mask[:half], train_t_segments[:half], train_t_labels[:half]
                             if len(eval_ids) == 0 or len(train_t_ids) == 0:
                                 continue
 
@@ -1019,9 +1114,9 @@ def main():
                             loss_meta, loss_train = step_metaxl(model, optimizer,
                                                                     raptors, meta_opt,
                                                                     reweighting_module, reweighting_opt,
-                                                                    train_s_ids, train_s_mask, train_s_labels,
-                                                                    train_t_ids, train_t_mask, train_t_labels,
-                                                                    eval_ids, eval_mask, eval_labels,
+                                                                    train_s_ids, train_s_mask, train_s_segments, train_s_labels,
+                                                                    train_t_ids, train_t_mask, train_t_segments, train_t_labels,
+                                                                    eval_ids, eval_mask, eval_segments, eval_labels,
                                                                     j if args.meta_per_lang else 0, layers, eta, args)
 
                             # logger.info(raptors.nets[0][0].weight)
@@ -1032,8 +1127,8 @@ def main():
                             loss_meta, loss_train = step_jt_metaxl(model, optimizer,
                                                                     raptors, meta_opt,
                                                                     reweighting_module, reweighting_opt,
-                                                                    train_s_ids, train_s_mask, train_s_labels,
-                                                                    train_t_ids, train_t_mask, train_t_labels,
+                                                                    train_s_ids, train_s_mask, train_s_segments, train_s_labels,
+                                                                    train_t_ids, train_t_mask, train_t_segments, train_t_labels,
                                                                     j if args.meta_per_lang else 0, layers, eta, args)
 
                         elif args.method == 'metawt':
@@ -1044,23 +1139,23 @@ def main():
                                                                                             :half], train_t_labels[
                                                                                                     :half]
                             loss_meta, loss_train = step_metawt_mix(model, optimizer, raptors, meta_opt,
-                                                                    train_s_ids, train_s_mask, train_s_labels,
-                                                                    train_t_ids, train_t_mask, train_t_labels,
-                                                                    eval_ids, eval_mask, eval_labels,
+                                                                    train_s_ids, train_s_mask, train_s_segments, train_s_labels,
+                                                                    train_t_ids, train_t_mask, train_t_segments, train_t_labels,
+                                                                    eval_ids, eval_mask, eval_segments, eval_labels,
                                                                     eta, args)
                         elif args.method == 'metawt_multi':
                             half = int(len(train_t_ids) / 2)
                             eval_ids, eval_mask, eval_labels = train_t_ids[half:], train_t_mask[half:], train_t_labels[half:]
                             train_t_ids, train_t_mask, train_t_labels = train_t_ids[:half], train_t_mask[:half], train_t_labels[:half]
                             loss_meta, loss_train = step_metawt_multi_mix(model, optimizer, raptors, meta_opt,
-                                                                          train_s_ids, train_s_mask, train_s_labels,
-                                                                          train_t_ids, train_t_mask, train_t_labels,
-                                                                          eval_ids, eval_mask, eval_labels,
+                                                                          train_s_ids, train_s_mask, train_s_segments, train_s_labels,
+                                                                          train_t_ids, train_t_mask, train_t_segments, train_t_labels,
+                                                                          eval_ids, eval_mask, eval_segments, eval_labels,
                                                                           eta, args, j)
                         elif args.method in "joint_training":
                             loss_meta, loss_train = step_gold_mix(model, optimizer,
-                                                                  data_s=train_s_ids, mask_s=train_s_mask, target_s=train_s_labels,
-                                                                  data_g=train_t_ids, mask_g=train_t_mask, target_g=train_t_labels,
+                                                                  data_s=train_s_ids, mask_s=train_s_mask, segments_s=train_s_segments, target_s=train_s_labels,
+                                                                  data_g=train_t_ids, mask_g=train_t_mask, segments_g=train_t_segments, target_g=train_t_labels,
                                                                   args=args)
                         else:
                             raise Exception('Method %s not implemented yet.' % args.method)
@@ -1088,8 +1183,8 @@ def main():
             #     permutate_network.eval()
             if reweighting_module is not None:
                 reweighting_module.eval()
-            val_score, val_acc, val_precision, val_recall = eval(model, dev_loader.loader, processor, for_classification=(args.task_name=="sent"))
-            test_score, test_acc, test_precision, test_recall = eval(model, test_loader, processor, for_classification=(args.task_name=="sent"))
+            val_score, val_acc, val_precision, val_recall = eval(model, dev_loader.loader, processor, for_classification=args.for_classification)
+            test_score, test_acc, test_precision, test_recall = eval(model, test_loader, processor, for_classification=args.for_classification)
             model.train()
             if raptors is not None:
                 raptors.train()
@@ -1122,7 +1217,7 @@ def main():
         print ('====== Final performance =======')
         model.load_state_dict(torch.load(os.path.join(args.output_dir, 'best.pt')))
         model.eval()
-        score, acc, precision, recall = eval(model, test_loader, processor, for_classification=(args.task_name == "sent"))
+        score, acc, precision, recall = eval(model, test_loader, processor, for_classification=args.for_classification)
         print ('Best Dev F1:', -best_val_metric)
         print ('Test F1:', score, 'Test ACC:', acc, 'Precision:', precision, 'Recall:', recall)
         _logw.write('%s\tFinal best Dev F1: %.4f\tTest F1: %.4f\n' % (tgt_lang, -best_val_metric, score))
@@ -1164,19 +1259,19 @@ def main():
                     batch_train_s = tuple(t.to(device) for t in batch_train_s)  # src train
                     batch_train_t = tuple(t.to(device) for t in batch_train_t)  # tgt train
 
-                    train_s_ids, train_s_mask, train_s_labels = batch_train_s
-                    train_s_ids, train_s_mask, train_s_labels = trim_input(train_s_ids, train_s_mask, train_s_labels,
+                    train_s_ids, train_s_mask, train_s_segments, train_s_labels = batch_train_s
+                    train_s_ids, train_s_mask, train_s_segments, train_s_labels = trim_input(train_s_ids, train_s_mask, train_s_segments, train_s_labels,
                                                                            args.train_max_seq_length)
 
-                    train_t_ids, train_t_mask, train_t_labels = batch_train_t
-                    train_t_ids, train_t_mask, train_t_labels = trim_input(train_t_ids, train_t_mask, train_t_labels,
+                    train_t_ids, train_t_mask, train_t_segments, train_t_labels = batch_train_t
+                    train_t_ids, train_t_mask, train_t_segments, train_t_labels = trim_input(train_t_ids, train_t_mask, train_t_segments, train_t_labels,
                                                                            args.train_max_seq_length)
 
                     layers = [int(l) for l in layers]
                     loss_t, loss_s = step_metaxl_finetune(model, optimizer, raptors,
 
-                                                            train_s_ids, train_s_mask, train_s_labels,
-                                                            train_t_ids, train_t_mask, train_t_labels,
+                                                            train_s_ids, train_s_mask, train_s_segments, train_s_labels,
+                                                            train_t_ids, train_t_mask, train_t_segments, train_t_labels,
                                                             j if args.meta_per_lang else 0, layers, args)
 
             model.eval()
