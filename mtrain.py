@@ -367,25 +367,15 @@ def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer
     features = []
     for idx, example in enumerate(examples):
         if example.text_b:
-            # text_a_id = tokenizer.encode(example.text_a, add_special_tokens=False)[:max_seq_length]
-            # text_b_id = tokenizer.encode(example.text_b, add_special_tokens=False)[:max_seq_length]
-            text_a_id = tokenizer.encode(example.text_a)[0][:int(max_seq_length / 2)]
-            text_b_id = tokenizer.encode(example.text_b)[0][:int(max_seq_length / 2)]
-            pair_token_ids = [tokenizer.cls_id] + text_a_id + [tokenizer.sep_id] + text_b_id + [tokenizer.sep_id]
-            text_a_len = len(text_a_id)
-            text_b_len = len(text_b_id)
-
-            segment_ids = [0] * (text_a_len + 2) + [1] * (text_b_len + 1)  # sentence 0 and sentence 1
-            attention_mask_ids = [1] * (text_a_len + text_b_len + 3)  # mask padded values
-
+            input_ids, input_mask, segment_ids, label_ids = tokenizer.encode(example.text_a, example.text_b, example.label)
             features.append(
-                InputFeatures(input_ids=pair_token_ids,
-                            input_mask=attention_mask_ids,
-                            label_ids=example.label,
+                InputFeatures(input_ids=input_ids,
+                            input_mask=input_mask,
+                            label_ids=label_ids,
                             segment_ids=segment_ids)
             )
         else:
-            input_ids, input_mask, label_ids = tokenizer.encode(example.text_a, example.label)
+            input_ids, input_mask, label_ids = tokenizer.encode(example.text_a, label_list=example.label)
             features.append(
                 InputFeatures(input_ids=input_ids[:max_seq_length],
                             input_mask=input_mask[:max_seq_length],
@@ -596,7 +586,7 @@ def main():
                         help="Whether to run eval or not.")
     parser.add_argument("--do_finetune",
                         action='store_true',
-                        help="Whether to run eval or not.")
+                        help="Whether to run finetune or not.")
     parser.add_argument("--do_lower_case",
                         action='store_true',
                         help="Set this flag if you are using an uncased model.")
@@ -651,7 +641,7 @@ def main():
                         help="Proportion of training to perform linear learning rate warmup for. "
                              "E.g., 0.1 = 10%% of training.")
     parser.add_argument("--weight_decay", default=5e-4, type=float,
-                        help="Weight deay if we apply some.")
+                        help="Weight decay if we apply some.")
     parser.add_argument("--adam_epsilon", default=1e-8, type=float,
                         help="Epsilon for Adam optimizer.")
     parser.add_argument("--max_grad_norm", default=1.0, type=float,
@@ -881,8 +871,8 @@ def main():
             test_sampler = None
             batch_size = args.batch_size
         else:
-            train_t_sampler = DistributedSampler(train_t_data)
-            train_s_sampler = DistributedSampler(train_s_data)
+            train_t_sampler = DistributedRandomSampler(train_t_data)
+            train_s_sampler = DistributedRandomSampler(train_s_dataa)
             dev_sampler = DistributedSampler(dev_data)
             test_sampler = DistributedSampler(test_data)
             batch_size = int(args.batch_size / int(os.environ['NGPU']))
@@ -1105,6 +1095,7 @@ def main():
                             if len(eval_ids) == 0 or len(train_t_ids) == 0:
                                 continue
 
+                            print()
                             print("*"*20, "source", "*"*20)
                             print(eval_ids.shape, eval_labels.shape)
                             print("*" * 20, "target", "*" * 20)

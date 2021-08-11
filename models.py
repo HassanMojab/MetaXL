@@ -1,18 +1,13 @@
-import numpy as np
 import sys
 import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from transformers import BertTokenizer, BertForTokenClassification, BertPreTrainedModel, XLMRobertaTokenizer, XLMRobertaForTokenClassification
+from transformers import BertTokenizer, BertForTokenClassification, XLMRobertaTokenizer, XLMRobertaForTokenClassification
 from transformers.modeling_bert import BertLayer, BertModel, BertEmbeddings, BertEncoder, BertPooler
-from transformers.file_utils import add_start_docstrings, add_start_docstrings_to_callable
 
-from tokenizers import ByteLevelBPETokenizer
-from tokenizers.processors import BertProcessing
-
-from torch.nn import CrossEntropyLoss, MSELoss
+from torch.nn import CrossEntropyLoss
 
 
 IGNORED_INDEX = -100
@@ -22,6 +17,8 @@ class BERTSequenceTokenizer():
         #from pytorch_transformers import BertTokenizer
         self.CLS = '[CLS]'
         self.SEP = '[SEP]'
+        self.BOS = '<s>'
+        self.EOS = '</s>'
         self.max_len = max_len
 
         tok = XLMRobertaTokenizer if bert_name.startswith("xlm") else BertTokenizer
@@ -29,19 +26,15 @@ class BERTSequenceTokenizer():
             self.tokenizer = tok.from_pretrained(bert_name, cache_dir=cache_dir)
         else:
             self.tokenizer = tok.from_pretrained(os.path.join(tokenizer_dir, 'vocab-vocab.txt'))
-            # self.tokenizer = ByteLevelBPETokenizer(
-            #         vocab_file=os.path.join(tokenizer_dir, "vocab.json"),
-            #         merges_file=os.path.join(tokenizer_dir, "merges.txt"))
-            # self.cls_id = self.tokenizer.token_to_id(self.CLS)
-            # self.sep_id = self.tokenizer.token_to_id(self.SEP)
 
         self.cls_id = self.tokenizer.convert_tokens_to_ids(self.CLS)
         self.sep_id = self.tokenizer.convert_tokens_to_ids(self.SEP)
+        self.bos_id = self.tokenizer.convert_tokens_to_ids(self.BOS)
+        self.eos_id = self.tokenizer.convert_tokens_to_ids(self.EOS)
 
-    def encode(self, token_list, label_list=None):
+    def encode(self, token_list, text_pair=None, label_list=None):
         if type(label_list) == list:
             assert len(token_list) == len(label_list), 'Mismatch text and label length!'
-            n_tokens = len(token_list)
 
             ids = [self.cls_id]
             labels = [IGNORED_INDEX]
@@ -50,7 +43,7 @@ class BERTSequenceTokenizer():
                 subword_ids = self.tokenizer.encode(token, add_special_tokens=False)  # add_special_tokens has to be FALSE here
                 if len(subword_ids) == 0: # some instance in wikiann is empty but has ner tags
                     subword_ids = [self.tokenizer.convert_tokens_to_ids('[OOV]')]
-                    print('Emtpy subwords for |%s|, Token tag: %s, replaced with [OOV]' % (token, label_list[i]))
+                    print('Empty subwords for |%s|, Token tag: %s, replaced with [OOV]' % (token, label_list[i]))
                 ids = ids + subword_ids
                 labels.append(label_list[i])
 
@@ -59,6 +52,17 @@ class BERTSequenceTokenizer():
 
             ids.append(self.sep_id)
             labels.append(IGNORED_INDEX)
+        elif text_pair:
+            # max_len = int(self.max_len / 2 - 2)
+
+            ids = self.tokenizer.encode_plus(token_list, text_pair, max_length=self.max_len, pad_to_max_length=True)
+            mask = ids['attention_mask']
+            ids = ids['input_ids']
+
+            text_a_len = ids.index(self.eos_id) + 1
+            segment_ids = [0] * text_a_len + [1] * (self.max_len - text_a_len)
+
+            labels = label_list
         else:
             ids = [self.cls_id] + self.tokenizer.encode(token_list, add_special_tokens=False) + [self.sep_id]
             labels = label_list
@@ -83,35 +87,16 @@ class BERTSequenceTokenizer():
             if type(label_list) == list:
                 labels = labels[:self.max_len]
             print ('Excessively long sequence, trimmed down!')
+
         else:
             ids = ids + [0] * (self.max_len - x_len)
             mask = [1] * x_len + [0] * (self.max_len - x_len)
+            segment_ids += [1] * (self.max_len - len(segment_ids))
             if type(label_list) == list:
                 labels = labels + [IGNORED_INDEX] * (self.max_len - x_len)
 
-        return ids, mask, labels
-
-    def encode2(self, text, label_list):
-        tokens = self.tokenizer.tokenize(text)
-        tokens =  [self.CLS] + tokens + [self.SEP] # add special tokens
-        ids = self.tokenizer.convert_tokens_to_ids(tokens)
-        x_len = len(ids)
-
-        print (x_len)
-        print (text)
-        print (tokens)
-        print (label_list)
-
-        ids = ids + [0] * (self.max_len - x_len)
-        mask = [1] * x_len + [0] * (self.max_len - x_len)
-
-        labels = [IGNORED_INDEX] * self.max_len # ignored for all and then set labels for actual tokens
-        idx = 0
-
-        for i, token in enumerate(tokens):
-            if token not in [self.CLS, self.SEP] and not token.startswith('##'): # actual token (or prefix)
-                labels[i] = label_list[idx]
-                idx += 1
+        if text_pair:
+            return ids, mask, segment_ids, labels
 
         return ids, mask, labels
 
@@ -742,5 +727,3 @@ class SplitBertEmbeddings(BertEmbeddings):
         embeddings = self.LayerNorm(embeddings)
         embeddings = self.dropout(embeddings)
         return embeddings
-
-
